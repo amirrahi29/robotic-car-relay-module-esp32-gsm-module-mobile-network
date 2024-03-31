@@ -1,0 +1,242 @@
+#include <Arduino.h>
+#include "BluetoothSerial.h"
+
+#define RXD2 27
+#define TXD2 26
+#define powerPin 4
+#define ANSWER_CMD "ATA"
+
+#define buttonPin 2  // Define the pin for the button
+#define relayPin 15   // Define the pin for the relay
+
+#define MAX_MESSAGES 10     // Maximum number of stored messages
+#define CALL_TIMEOUT 90000  // Maximum call duration in milliseconds (90 seconds)
+
+#define SERIAL_TIMEOUT 12000  // Timeout for Serial response in milliseconds
+
+#define START_COMMAND '5'
+#define STOP_COMMAND '6'
+
+String number = "+919575811347";  // Example phone number
+
+unsigned long callStartTime = 0;  // Variable to store the call start time
+bool callActive = false;          // Flag to track if a call is active
+
+BluetoothSerial SerialBT;
+String cmd;
+
+void setup() {
+  pinMode(powerPin, OUTPUT);
+  digitalWrite(powerPin, LOW);
+  pinMode(buttonPin, INPUT_PULLUP);  // Set button pin as input with internal pull-up resistor
+  pinMode(relayPin, OUTPUT);         // Set relay pin as output
+
+  Serial.begin(115200);
+  Serial1.begin(115200, SERIAL_8N1, RXD2, TXD2);  // Initialize Serial1
+
+  Serial.println("Modem Reset, please wait");
+  sendAndWaitForResponse("AT+CRESET");
+
+  Serial.println("Echo Off");
+  sendAndWaitForResponse("ATE0");
+
+  Serial.println("SIM card check");
+  sendAndWaitForResponse("AT+CPIN?");
+
+  // Check Signal Strength
+  sendAndWaitForResponse("AT+CSQ");
+
+  // Check Network Registration Status
+  sendAndWaitForResponse("AT+CREG?");
+
+  // Check Network Operator Information
+  sendAndWaitForResponse("AT+COPS?");
+
+  Serial.println("Type 's' to send an SMS, 'r' to receive an SMS, and 'c' to make a call");
+
+  SerialBT.begin("MyESP32Car"); // Set the Bluetooth device name to "MyESP32"
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    char command = Serial.read();
+    switch (command) {
+      case 's':
+        SendMessage();
+        break;
+      case 'r':
+        ReceiveMessage();
+        break;
+      case 'c':
+        callNumber();
+        break;
+    }
+  }
+
+  if (Serial1.available() > 0) {
+    handleDTMFInput();
+    if (callActive && isCallTimeout()) {
+      Serial.println("Call timed out. Disconnecting...");
+      disconnectCall();
+    }
+  }
+
+  if (callActive && digitalRead(buttonPin) == HIGH) {
+    Serial.println("Button clicked during call!");
+    disconnectCall();
+  }
+
+  if (SerialBT.available()) {
+    cmd = SerialBT.readStringUntil('\n'); // Read the entire string until a newline character
+
+    if (cmd == "start") {
+      startMotor();
+    }
+
+    if (cmd == "stop") {
+      stopMotor();
+    }
+  }
+}
+
+void handleDTMFInput() {
+  String input = Serial1.readStringUntil('\n');
+  Serial.println("Serial1 input dtmf value: " + input);  // Debug: Print received data from Serial1
+
+  int dtmfValue = input.substring(input.indexOf(":") + 1).toInt();  // Extract DTMF value
+  Serial.print("Received DTMF: ");
+  Serial.println(dtmfValue);
+
+  switch (dtmfValue) {
+    case 0:
+      Serial.println("You pressed zero");
+      break;
+    case 1:
+      Serial.println("You pressed one");
+      break;
+    case 2:
+      Serial.println("You pressed two");
+      break;
+    case 3:
+      Serial.println("You pressed three");
+      break;
+    case 4:
+      Serial.println("You pressed four");
+      break;
+    case 5:
+      Serial.println("You pressed five");
+      startMotor();
+      break;
+    case 6:
+      Serial.println("You pressed six");
+      stopMotor();
+      break;
+    case 7:
+      Serial.println("You pressed seven");
+      break;
+    case 8:
+      Serial.println("You pressed eight");
+      break;
+    case 9:
+      Serial.println("You pressed nine");
+      break;
+    case 10:  // *
+      Serial.println("You pressed asterisk (*)");
+      break;
+    case 11:  // #
+      Serial.println("You pressed hash (#)");
+      break;
+    default:
+      Serial.println("Invalid DTMF value");
+      break;
+  }
+
+  if (input.startsWith("+CLCC:")) {
+    Serial.println("Incoming Call Detected:");
+    Serial.println(input);
+    answerCall();
+  }
+}
+
+bool isCallTimeout() {
+  return (millis() - callStartTime >= CALL_TIMEOUT);
+}
+
+void answerCall() {
+  Serial.println("Answering Call...");
+  sendAndWaitForResponse(ANSWER_CMD);
+  delay(3000);  // Give more time to establish the call
+
+  sendAndWaitForResponse("AT+CLCC");
+  delay(1000);
+
+  while (Serial1.available()) {
+    String response = Serial1.readStringUntil('\n');
+    if (response.indexOf("+CLCC:") != -1) {
+      callActive = true;
+      Serial.println("Call active after answering.");
+      break;
+    }
+  }
+
+  if (!callActive) {
+    Serial.println("Call not active after answering.");
+  }
+
+  callStartTime = millis();  // Record the time when the call was picked up
+}
+
+void SendMessage() {
+  sendAndWaitForResponse("AT+CMGF=1");
+  Serial1.print("AT+CMGS=\"");
+  Serial1.print(number);
+  Serial1.println("\"");
+  delay(2000);  // Increase the delay
+  Serial1.println("MESSAGE FROM VVM501 ESP32 4G LTE MODULE");
+  Serial1.write(0x1A);  // Send CTRL+Z to indicate the end of the message
+  waitForResponse();
+}
+
+void ReceiveMessage() {
+  // Implementation of receiving messages, if required
+}
+
+void callNumber() {
+  sendAndWaitForResponse("ATD" + number + ";\r\n");
+  delay(15000);  // Increase the delay
+  waitForResponse();
+}
+
+void disconnectCall() {
+  if(callActive){
+    stopMotor();
+  }
+  sendAndWaitForResponse("ATH");
+  callActive = false;
+}
+
+void sendAndWaitForResponse(String command) {
+  Serial1.println(command);
+  waitForResponse();
+}
+
+void waitForResponse() {
+  unsigned long startTime = millis();
+  while (!Serial1.available() && (millis() - startTime < SERIAL_TIMEOUT)) {
+    delay(13);
+  }
+  if (Serial1.available()) {
+    String response = Serial1.readString();
+    Serial.println(response);
+  }
+}
+
+void startMotor() {
+  if (!callActive) {               // Check if a call is not active
+    digitalWrite(relayPin, HIGH);  // Start the motor
+  }
+}
+
+void stopMotor() {
+  digitalWrite(relayPin, LOW);  // Stop the motor
+}
